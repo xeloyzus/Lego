@@ -74,7 +74,7 @@ while ~JoyMainSwitch
 
     if k == 1
         T_s(k) = 0.05;       % Antar 20 Hz sampling i starten
-        y(k) = 0;
+        y(k) = u(k);
         u_filtrert(k) = u(k);  % Initielt filtrert signal starter med u(k)
     else
         if k <= length(Tid) && k <= length(u)

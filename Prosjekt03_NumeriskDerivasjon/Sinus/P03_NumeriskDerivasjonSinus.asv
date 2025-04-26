@@ -10,14 +10,13 @@
 % - Bryter
 %--------------------------------------------------------------------------
 
-
 %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 %         EXPERIMENT SETUP, FILENAME AND FIGURE
 
 clear; close all   % Alltid lurt å rydde workspace opp først
 online = false;    % Online mot EV3 eller mot lagrede data?
 plotting = true;   % Skal det plottes mens forsøket kjøres
-filename = 'Prosjekt03_NumeriskDerivasjon/Stigningstall/P03_minedata_sinus.mat';
+filename = 'Prosjekt03_NumeriskDerivasjon/Sinus/P01_sinus_justert.mat';
 
 if online
     % LEGO EV3 og styrestikke
@@ -45,11 +44,10 @@ k=0;
 % Velg måling Tid, Avstand og Bryter
 Ts_nom = 0.01; % Nominell verdi for tidssteg [s]
 % Spesifiser tau og beregn alfa
-fc = 1.5; % Knekkfrekvens [Hz]
+fc = 0.45; % Knekkfrekvens [Hz]
 tau = 1/(2*pi*fc); % Tidskonstant [s]
 
 %----------------------------------------------------------------------
-
 
 while ~JoyMainSwitch
     %+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
@@ -88,7 +86,6 @@ while ~JoyMainSwitch
         end
     end
 
-
     % +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     %             CONDITIONS, CALCULATIONS AND SET MOTOR POWER
     % Gjør matematiske beregninger og motorkraftberegninger.
@@ -116,57 +113,75 @@ while ~JoyMainSwitch
     end
 
     %--------------------------------------------------------------
-
+    % VERIFISER NUMERISK DERIVASJON MED FORHÅNDSDEFINERTE PARAMETRE
+    
+    % Bruk forhåndsdefinerte verdier for amplitude og frekvens
+    U = 0.1; % amplitude [m]
+    w = 2*pi*(1/2.65); % vinkelfrekvens [rad/s] 
+    
+    % Beregn konstantledd (C) som gjennomsnitt av filtrert signal
+    C = mean(u_f);
+    
+    % Lag tilpasset sinusbølge for avstand (Ligning 8.8)
+    u_f_est = U * sin(w * Tid(1:k)) + C;
+    
+    % Teoretisk derivert (hastighet) (Ligning 8.9)
+    V = U*w; % amplitude [m/s]
+    phi = pi/2; % faseforskyvning
+    
+    v_f_est = V * sin(w * Tid(1:k) + phi);
 
     %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     %                  PLOT DATA
-    %
+    
     % Plotter enten i sann tid eller når forsøk avsluttes
-
     if plotting || JoyMainSwitch
         if k > 1
             x_min = min(Tid(1:k));
             x_max = max(Tid(1:k));
 
             subplot(3,1,1)
-            plot(Tid(1:k), u(1:k), 'b-'); hold on;
-            plot(Tid(1:k), u_f(1:k), 'r-'); hold off;
+            plot(Tid(1:k), u_f(1:k), 'b-'); hold on;
+            plot(Tid(1:k), u_f_est(1:k), 'r-'); hold off;
             grid on;
-            legend('$\{u_k\}$', '$\{u_f\}$', 'Interpreter', 'latex');
-            title('Avstandsmålinger og IIR Filtrert avstandsmålinger', 'Interpreter', 'latex');
+            legend('Målt avstand', 'Estimert sinus', 'Interpreter', 'latex');
+            title('Filtrert avstandsmålinger vs estimert sinus', 'Interpreter', 'latex');
             xlabel('Tid [s]');
             ylabel('Avstand [m]');
             xlim([x_min, x_max]);
-            ylim([min([u(1:k), u_f(1:k)])-0.1, max([u(1:k), u_f(1:k)])+0.1]);
+            ylim([min(u_f(1:k))-0.1, max(u_f(1:k))+0.1]);
 
             subplot(3,1,2)
-            plot(Tid(1:k), Bryter(1:k), 'k');
+            plot(Tid(1:k), v_f(1:k), 'b-'); hold on;
+            plot(Tid(1:k), v_f_est(1:k), 'r-'); hold off;
             grid on;
-            title('Bryter på Laserpistol', 'Interpreter', 'latex');
-            xlabel('Tid [s]');
-            ylim([-0.5, 1.5]);
-            xlim([x_min, x_max]);
-
-            subplot(3,1,3)
-            plot(Tid(1:k), v(1:k), 'b-'); hold on;
-            plot(Tid(1:k), v_f(1:k), 'r-'); hold off;
-            grid on;
-            legend('$\{v_k\}$', '$\{v_f\}$', 'Interpreter', 'latex');
-            title('Hastighet beregnet fra avstand og filtrert avstand', 'Interpreter', 'latex');
+            legend('Beregnet hastighet', 'Teoretisk hastighet', 'Interpreter', 'latex');
+            title('Beregnet hastighet vs teoretisk hastighet', 'Interpreter', 'latex');
             xlabel('Tid [s]');
             ylabel('Hastighet [m/s]');
             xlim([x_min, x_max]);
-            ylim([min([v(1:k), v_f(1:k)])-0.5, max([v(1:k), v_f(1:k)])+0.5]);
+            ylim([min(v_f(1:k))-0.1, max(v_f(1:k))+0.1]);
+
+            subplot(3,1,3)
+            axis off;
+            text(0.1, 0.9, 'Brukte parametere:', 'FontSize', 12, 'FontWeight', 'bold');
+            text(0.1, 0.7, sprintf('Amplitude: U = %.2f m', U), 'FontSize', 12);
+            text(0.1, 0.5, sprintf('Vinkelfrekvens: ω = %.2f rad/s', w), 'FontSize', 12);
+            text(0.1, 0.3, sprintf('Hastighet amplitude: V = Uω = %.2f m/s', V), 'FontSize', 12);
+            text(0.1, 0.1, sprintf('Konstantledd: C = %.2f m', C), 'FontSize', 12);
         end
         drawnow;
     end
 end
 
-% +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-%           STOP MOTORS
+% Frekvensanalyse av signalet
+FrekvensSpekterSignal(u(1:k), Tid(1:k))
 
-% AVSLUTNING: STOPP MOTOR OG LAGRE DATA
+% +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+%           STOP MOTORS OG LAGRE DATA
+
 if online
-    save('P03_stigningstall.mat', 'Tid', 'Avstand', 'Bryter');
+    % Lagre data
+    save('P03_minedata_sinus.mat', 'Tid', 'Avstand', 'Bryter');
 end
 %------------------------------------------------------------------

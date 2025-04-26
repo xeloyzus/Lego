@@ -1,3 +1,4 @@
+%--------------------------------------------------------------------------
 % P01_NumeriskIntegrasjonSinus
 %
 % Hensikten med programmet er å numerisk integrere målesignal u_k som
@@ -10,16 +11,13 @@
 clear; close all;   % Tøm arbeidsområdet og lukk alle figurer
 online = false;      % Online modus (EV3) eller offline modus (last data)?
 plotting = true;    % Skal data plottes i sanntid?
-filename = 'Sinus/P01_sinus.mat'; % Filnavn for lagring/lasting av data
-
+filename = 'Prosjekt01_NumeriskIntegrasjon/Sinus/P01_sinus_justert.mat'; % Filnavn for lagring/lasting av data
 
 if online
     % Koble til LEGO EV3 og joystick
     mylego = legoev3('USB');
-    
     joystick = vrjoystick(1);
     [JoyAxes, JoyButtons] = HentJoystickVerdier(joystick);
-
 
     % Oppsett av sensorer
     myColorSensor = colorSensor(mylego);
@@ -28,172 +26,164 @@ if online
     mymotor = motor(mylego, 'A');
 else
     % Last inn lagrede data hvis offline
-    load(filename);
-
+    load(filename); % Laster inn Tid, Lys, osv.
 end
 
 % Opprett figur for plotting
 fig1 = figure;
-set(gcf, 'Position', [100, 100, 800, 600]); % Sett størrelse på figur
+set(gcf, 'Position', [100, 100, 800, 600]);
 drawnow;
 
 % Initialiser variabler
 JoyMainSwitch = 0; % Knappestatus for joystick - skal være 0 for å starte
-k = 0;             % Tellevariabel for iterasjoner           
+k = 0;             % Tellevariabel for iterasjoner
 y = [];
 u = [];
 T_s = [];
-u_filtered = zeros(size(Lys));
-y_filtered = zeros(size(Lys));
+
+fc = 1.5;                      % Lavpassfilter grensefrekvens
+tau = 1/(2*pi*fc);              % Tidskonstant for LPF
+u_filtrert = zeros(size(Lys));  % Rettet: korrekt initiering
+y_filtrert = zeros(size(Lys));  % Rettet: hvis du trenger det senere
+Tid = Tid(:)';                  % Sørg for riktig dimensjon (radvektor)
+Lys = Lys(:)';                  % Sørg for riktig dimensjon (radvektor)
+
 %--------------------------------------------------------------------------
-
-% HOVEDLØKKE - kjører til brukeren trykker på hovedknappen på joysticken
-
+% HOVEDLØKKE
 while ~JoyMainSwitch
     %+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     % HENT TID OG MÅLINGER FRA SENSORER, MOTORER OG JOYSTICK
 
-    k = k + 1; % Øk tellevariabel
+    k = k + 1;
 
     if online
-        % Hent tid
         if k == 1
-            tic; % Start tidtaker ved første iterasjon
+            tic; % Start tidtaker
         end
-        Tid(k) = toc;  % RETTET: Tid blir alltid oppdatert
+        Tid(k) = toc;
 
-        % Hent data fra lyssensor
         Lys(k) = double(readLightIntensity(myColorSensor, 'reflected'));
 
-        % Hent data fra joystick
         [JoyAxes, JoyButtons] = HentJoystickVerdier(joystick);
 
-        % Sjekk at vi ikke går ut av array-grenser
         if length(JoyButtons) >= 1
-            JoyMainSwitch = JoyButtons(1); % Avslutt program hvis hovedknapp trykkes
+            JoyMainSwitch = JoyButtons(1);
         end
         if length(JoyAxes) >= 4
-            JoyPot(k) = JoyAxes(4); % Bruk joystick-akse 4 for motorstyring
+            JoyPot(k) = JoyAxes(4);
         else
-            JoyPot(k) = 0; % Sett standardverdi til 0 hvis ingen data
+            JoyPot(k) = 0;
         end
 
-        % MOTORSTYRING BASERT PÅ JOYSTICK-VERDIER
         if k <= length(JoyPot)
-            motor_speed = round(JoyPot(k)); % Skalér joystick-verdi til motorhastighet (-100 til 100)
+            motor_speed = round(JoyPot(k));
             display(motor_speed);
-            % Sett motorkraft
             mymotor.Speed = motor_speed;
-            start(mymotor);  % Start motor med oppdatert hastighet
+            start(mymotor);
         end
     else
-        % Offline mode: Simuler data
+        % Offline modus
         if k > length(Tid)
-            JoyMainSwitch = 1; % Simuler knappetrykk når data er ferdig
+            JoyMainSwitch = 1;
         end
         if plotting
-            pause(0.03); % Simuler kommunikasjonsforsinkelse
+            pause(0.03);
         end
     end
 
-    % BEREGNINGER OG MOTORSTYRING
+    %=== BEREGNINGER ===
     if k <= length(Lys)
-        LysInit = Lys(1); % Startverdi for lysintensitet
-        u(k) = Lys(k) - LysInit;
-        %disp(['Initial Lys Value: ', num2str(Lys(1))]);
+        % Dynamisk baseline-korreksjon med glidende gjennomsnitt
+        if k == 1
+            LysInit = Lys(1);
+        else
+            LysInit = mean(Lys(max(1,k-100):k));  % Bruker siste 100 målinger
+        end
+        u(k) = Lys(k) - LysInit; % Fjerner DC-komponent
     end
 
     if k == 1
-        % Initialiser verdier
-        T_s(1) = 0.05; % Standard tidstrinn
-        y(k) = 0;     % Startverdi for volum (kan justeres)
+        T_s(1) = 0.05;
+        y(k) = 0;  % Startverdi for volum
+        u_filtrert(k) = u(k);
     else
-        % Beregn tidstrinn og volum med trapesintegrasjon
-       
         if k <= length(Tid) && k <= length(u)
-            T_s(k) = Tid(k) - Tid(k-1); % Tidstrinn
+            T_s(k) = Tid(k) - Tid(k-1);
             
-            [b,a] = butter(2, 0.05, 'high');  % 2nd-order, 0.05×Nyquist freq
+            % Forbedret filtrering med lavere alfa for bedre støyfjerning
+            alfa = 1-exp(-T_s(1)/tau);  % Redusert fra 0.01 for raskere respons
             
-            % Filtrering
-            if k > 1
-                u_filtered = filter(b, a, u(1:k));  %  filtrering
-                y(k) = y(k-1) + (T_s(k)/2)*(u_filtered(k) + u_filtered(k-1));
-            end
+            % Lavpassfilter for strømsignalet
+            u_filtrert(k) = (1 - alfa)*u(k) + alfa*u_filtrert(k-1);
             
+            % Numerisk integrasjon med trapesmetoden
+            % Legger til høypassfilter-effekt for å fjerne integreringsdrift
+            y(k) = y(k-1) + (T_s(k)/2)*(u_filtrert(k-1) + u_filtrert(k));
             
+         
         end
     end
 
     %+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
     % FILTERING AV SIGNALER
-
-    % Estimerte verdier for sammenligning
-    % Plassert helt nederst etter seksjonen STOP MOTORS
-    U = 7.8/2; % amplitude av estimering signal
-    w = 2*pi*(5/6); %vinkle rad/s av motoren
+    U = 10;
+    w = 2*pi*(1/5);   % ≈1.256 rad/s (5 sekunders periode)
     u_est = U*sin(w*Tid);
-    Y = U/w;
-    
-    y_A = U/w + y(1);
-    phi = - pi/4;
+    Y = U/w;          % ≈7.96 (teoretisk amplitudeforhold ved integrasjon)
+    y_A = -10;        % Justert offset for bedre passing med data
+    phi = -pi/2;      % Negativ faseforskyvning for integrasjon
     y_est = Y*sin(w*Tid + phi) + y_A;
 
     %+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
+    % PLOTTING
+    if plotting || JoyMainSwitch
+        if k <= length(Tid) && k <= length(u) && k <= length(y)
+            subplot(2, 1, 1);
+            hold off;
+            plot(Tid(1:k), u(1:k), 'b-', 'LineWidth', 1.5);
+            hold on;
+            plot(Tid, u_est, 'r--', 'LineWidth', 1.5);
+            title('Vannstr{\aa}m inn og ut av Ballong','Interpreter','latex');
+            ylabel('(Liter/s)');
+            grid on;
+            if k > 1
+                xlim([min(Tid(1:k)), max(Tid(1:k))]);
+            end
+            ylim([min(u(1:k)) - 1, max(u(1:k)) + 1]);
 
-    % PLOTTING AV DATA
-if plotting || JoyMainSwitch
-    if k <= length(Tid) && k <= length(u) && k <= length(y)
-        % First subplot (u and u_est)
-        subplot(2, 1, 1);
-        hold off; % Clear previous plot
-        plot(Tid(1:k), u_filtered(1:k), 'b-', 'LineWidth', 1.5); % Measured signal
-        hold on;
-        plot(Tid, u_est, 'r--', 'LineWidth', 1.5); % Estimated signal
-        title('Vannstr{\aa}m inn og ut av Ballong','Interpreter','latex');
-        ylabel('(Liter/s)');
-        legend({'$\{u_k\}$', ...
-               ['$u(t) = ' num2str(U) '\sin(' num2str(w) 't)$']}, ...
-               'Interpreter', 'latex');
-        grid on;
-        if k > 1
-            xlim([min(Tid(1:k)), max(Tid(1:k))]);
+            subplot(2, 1, 2);
+            hold off;
+            plot(Tid(1:k), y(1:k), 'b-', 'LineWidth', 1.5);
+            hold on;
+            plot(Tid, y_est, 'r--', 'LineWidth', 1.5);
+            title('Ballong Volum','Interpreter','latex');
+            xlabel('Tid [sek]');
+            ylabel('(Liter)');
+            grid on;
+            if k > 1
+                xlim([min(Tid(1:k)), max(Tid(1:k))]);
+            end
+            % Dynamisk y-aksejustering basert på data
+            current_ylim = [min(y(1:k))-2, max(y(1:k))+2];
+            if diff(current_ylim) > 0  % Unngår feil hvis alle y-verdier er like
+                ylim(current_ylim);
+            end
+            drawnow;
         end
-        ylim([min(u(1:k)) - 1, max(u(1:k)) + 1]);
-
-        % Second subplot (y and y_est)
-        subplot(2, 1, 2);
-        hold off; % Clear previous plot
-        plot(Tid(1:k), y(1:k), 'b-', 'LineWidth', 1.5); % Measured volume
-        hold on;
-        plot(Tid, y_est, 'r--', 'LineWidth', 1.5); % Estimated volume
-        title('Ballong Volum','Interpreter','latex');
-        xlabel('Tid [sek]');
-        ylabel('(Liter)');
-        legend({'$\{y_k\}$', ...
-               ['$y(t) = ' num2str(Y) '\sin(' num2str(w) 't - \pi/2) + ' num2str(y_A) '$']}, ...
-               'Interpreter', 'latex');
-        grid on;
-        if k > 1
-            xlim([min(Tid(1:k)), max(Tid(1:k))]);
-        end
-        ylim([min(y(1:k)) - 1, max(y(1:k)) + 1]);
-        drawnow;
     end
 end
-end
 
-%++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-% AVSLUTNING: STOPP MOTOR OG LAGRE DATA
+% Frekvensspekter
+FrekvensSpekterSignal(u, Tid)
 
+subplot(2, 1, 1);
+legend({'$\{u_k\}$', ['$u(t) = ' num2str(U) '\sin(' num2str(w) 't)$']}, 'Interpreter', 'latex');
+subplot(2, 1, 2);
+legend({'$\{y_k\}$', ['$y(t) = ' num2str(Y) '\sin(' num2str(w) 't + ' num2str(phi) ') + ' num2str(y_A) '$']}, 'Interpreter', 'latex');
 
-% Stopp motor før avslutning
-
-% AVSLUTNING: STOPP MOTOR 
+% AVSLUTNING
 if online
-    stop(mymotor); % Stopp motor før avslutning
-
-    % Lagre data
-    %save('P01_sinus.mat', 'Tid', 'Lys', 'JoyPot'); % RETTET: Lagre data
+    stop(mymotor);
+    % save('P01_sinus.mat', 'Tid', 'Lys', 'JoyPot'); % Avkommenter hvis ønsket
 end

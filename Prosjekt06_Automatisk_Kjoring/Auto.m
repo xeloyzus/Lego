@@ -1,27 +1,20 @@
-%++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-% Prosjekt05_ManuellKjoring
+% Prosjekt05_LinjeFølging - Enhanced Version
 %
-% Hensikten med programmet er å tune er regulator
-% for styring av hastigheten til en motor
-%
-% Følgende motorer brukes:
-%  - motor A og motor B
+% Improved PID controller for line following with better corner handling
 %--------------------------------------------------------------------------
 
 clear; close all
 online = true;
 plotting = true;
-filename = 'P05_Manuell_Kjoring.mat';
+filename = 'P05_Automatisk_Kjoring.mat';
+calibrated = false;
 
 if online
     mylego = legoev3('USB');
-    joystick = vrjoystick(1);
-
     motorA = motor(mylego, 'A');
     motorB = motor(mylego,'D');
-
     myColorSensor = colorSensor(mylego);
-  
+    joystick = vrjoystick(1);
     motorA.resetRotation;
     motorB.resetRotation;
 else
@@ -29,29 +22,51 @@ else
 end
 
 fig1 = figure;
-set(gcf, 'Position', [100, 100, 1200, 900]);
+set(gcf, 'Position', [100, 100, 800, 600]);
 drawnow;
 
-% Initialiser alle arrayer som skal vokse
-Tid = []; Lys = []; VinkelPosMotorA = []; VinkelPosMotorB = []; GyroAngle = [];
-u_A = []; u_B = []; r = []; y = []; e = []; P = []; I = []; D = []; u_pid = [];
-IAE = []; MAE = []; TVA = []; TVB = [];
-
-JoyMainSwitch = 0;
+% Kalibreringsvariabler
+white = 24;
+black = 4;
+midpoint = 0;
+MainSwitch = 0;
 k = 0;
-fc = 1.4;
-tau = 1/(2*pi*fc);
 
+% Base PID parameters - will adjust dynamically
+base_Kp = 1.5;      % Increased from original
+base_Ki = 0.02;     % Reduced from original to reduce overshoot
+base_Kd = 0.5;      % Increased from original for better cornering
+base_speed = 15;
+
+% Dynamic tuning parameters
+max_error = 70;     % Maximum expected error value
+aggressive_factor = 2.5; % How much to boost P in corners
+corner_threshold = 45;  % Error value that indicates a corner
+
+% Filter and limiting parameters
+filter_coeff = 0.5;  % Smoother filtering
+
+% Reduced integrator windup
+I_max = 45;        
+I_min = -45;
+max_accel = 8;      % Maximum speed change per cycle (smoother motion)
+
+% State variables
+I_prev = 0;
+e_f_prev = 0;
 prev_uA = 0;
 prev_uB = 0;
+prev_speed = base_speed;
+corner_flag = false;
+corner_counter = 0;
 
-% Kontrollparametre
-base_speed = 40;    % Grunnhastighet (fra joystick)
-max_speed = 50;     % Maks hastighet
-steering_gain = 30; % Følsomhet for svinging
-deadzone = 0.1;     % Dødsone for styrestikkeaksene
+% Kalibreringsrutine
+if ~calibrated
+    midpoint = max(0, min(100, (white + black) / 2));
+    calibrated = true;
+end
 
-while ~JoyMainSwitch
+while ~MainSwitch
     k = k + 1;
 
     if online
@@ -65,42 +80,23 @@ while ~JoyMainSwitch
         Lys(k) = double(readLightIntensity(myColorSensor, 'reflected'));
         VinkelPosMotorA(k) = double(motorA.readRotation);
         VinkelPosMotorB(k) = double(motorB.readRotation);
-    
-
-        % Hent styrestikkeverdier
-        joyY = -100 * axis(joystick, 2);  % Fram/bak (akse 2)
-        joyX = 100 * axis(joystick, 3);   % Sving (akse 3)
-
-        [~, JoyButtons] = HentJoystickVerdier(joystick);
-        JoyMainSwitch = JoyButtons(1);
-
        
-
+        [~, JoyButtons] = HentJoystickVerdier(joystick);
+        MainSwitch = JoyButtons(1);
     else
-        if k == length(Tid)
-            JoyMainSwitch = 1;
+        if k >= length(Tid)
+            MainSwitch = 1;
         end
         if plotting
             pause(0.03)
         end
     end
 
-    %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    %       PID REGULATOR OG BEREGNINGER
-
-    u0 = 0;
-    Kp = 0.1;
-    Ki = 0.05;
-    Kd = 0.01;
-    I_max = 100;
-    I_min = -100;
-
-    % Lysmåling og referanse
     if k == 1
         T_s(k) = 0.05;
-        r(k) = Lys(1);  % Initial lysverdi som referanse
-        y(k) = Lys(k);  % Bruk lysverdi direkte
-        e(k) = r(k) - y(k);
+        r(k) = Lys(1);
+        y(k) = Lys(k);
+        e(k) = y(k)-r(k);
         e_f(k) = e(k);
         IAE(k) = abs(e(k)) * T_s(k);
         MAE(k) = abs(e(k));
@@ -110,63 +106,83 @@ while ~JoyMainSwitch
         P(k) = 0;
         D(k) = 0;
         u_pid(k) = 0;
-
     else
+        % Sample time calculation
         T_s(k) = Tid(k) - Tid(k-1);
-        r(k) = r(1);  % Behold samme referanse
-        y(k) = Lys(k);  % Bruk lysverdi direkte
-        e(k) = r(k) - y(k);
-
-
-        % Bruk din MinPID-funksjon
-        para = [Kp, Ki, Kd, I_max, I_min, 0.3]; % 0.3 er filterverdi
-        [P(k), I(k), D(k), e_f(k)] = MinPID(I(k-1), e_f(k-1), [e(k-1), e(k)], T_s(k), para);
-
+        if T_s(k) <= 0
+            T_s(k) = 0.05; % Default if time calculation fails
+        end
+        
+        % Reference and error
+        r(k) = Lys(1);
+        y(k) = Lys(k);
+        e(k) = y(k)-r(k);
+        
+        % Dynamic PID tuning based on error
+        error_ratio = min(abs(e(k))/max_error, 1);
+        
+        % Boost P term in corners
+        if abs(e(k)) > corner_threshold
+            if ~corner_flag
+                corner_flag = true;
+                corner_counter = 0;
+            end
+            corner_counter = corner_counter + 1;
+            Kp = base_Kp * aggressive_factor;
+            Ki = base_Ki * 0.5;  % Reduce I during corners
+            Kd = base_Kd * 1.2;   % Increase D during corners
+        else
+            if corner_flag && corner_counter > 0
+                corner_counter = corner_counter - 1;
+                if corner_counter <= 0
+                    corner_flag = false;
+                end
+            end
+            Kp = base_Kp * (1 + 0.5*error_ratio);  % Gradual increase
+            Ki = base_Ki;
+            Kd = base_Kd;
+        end
+        
+        % PID calculation
+        para = [Kp, Ki, Kd, I_max, I_min, filter_coeff];
+        [P(k), I(k), D(k), e_f(k)] = MinPID(I_prev, e_f_prev, [e(k-1), e(k)], T_s(k), para);
         IAE(k) = IAE(k-1) + abs(e(k)) * T_s(k);
         MAE(k) = (MAE(k-1)*(k-1) + abs(e(k))) / k;
-        % Lavpassfiltrering
-        
     end
-   
-    u_pid(k) = u0 + P(k) + I(k) + D(k); % Lagre PID-utgang i array
 
+    u_pid(k) = P(k) + I(k) + D(k);
     
-    %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-    % KOMBINER PID OG JOYSTICK INNPUT
-    %++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-
-    % Anvend dødsone på styrestikkeaksene
-    if abs(joyY) < deadzone
-        joyY = 0;
+    % Dynamic speed adjustment
+    speed_factor = max(0.4, 1 - (abs(e(k))/max_error)^1.5);
+    target_speed = base_speed * speed_factor;
+    
+    % Rate limit speed changes
+    speed_change = target_speed - prev_speed;
+    if abs(speed_change) > max_accel
+        target_speed = prev_speed + sign(speed_change)*max_accel;
     end
-    if abs(joyX) < deadzone
-        joyX = 0;
-    end
-
-    % Beregn hastighet og sving
-    speed_cmd = joyY/100 * base_speed;
-    turn_cmd = joyX/100 * steering_gain;
-
-    % Beregn motorpådrag
-    u_A(k) = speed_cmd + turn_cmd - u_pid(k);
-    u_B(k) = speed_cmd - turn_cmd + u_pid(k);
-
-    % Begrens hastigheter
+    prev_speed = target_speed;
+    
+    % Motor control with anti-windup
+    u_A(k) = target_speed + u_pid(k);
+    u_B(k) = target_speed - u_pid(k);
+    
+    % Clamp motor speeds
     u_A(k) = max(min(u_A(k), 100), -100);
     u_B(k) = max(min(u_B(k), 100), -100);
-
-    % Beregn total variasjon
+    
+    % Store previous values
     if k > 1
         TVA(k) = TVA(k-1) + abs(u_A(k) - prev_uA);
         TVB(k) = TVB(k-1) + abs(u_B(k) - prev_uB);
-        
-
     else
         TVA(k) = 0;
         TVB(k) = 0;
     end
     prev_uA = u_A(k);
     prev_uB = u_B(k);
+    I_prev = I(k);
+    e_f_prev = e_f(k);
 
     if online
         motorA.Speed = u_A(k);
@@ -175,8 +191,9 @@ while ~JoyMainSwitch
         start(motorB);
     end
 
-    if plotting || JoyMainSwitch
-        figure(fig1)
+    % Plotting (same as before)
+    if plotting || MainSwitch
+               figure(fig1)
 
         subplot(3, 2, 1)
         plot(Tid(1:k), r(1:k), 'r-', 'DisplayName', '$r_k$');
@@ -219,10 +236,7 @@ while ~JoyMainSwitch
 
         drawnow
     end
-
 end
-%++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-%                       LEGG TIL LEGENDER ETTER PLOTTING
 
 figure(fig1)
 
@@ -250,19 +264,13 @@ subplot(3, 2, 6)
 legend('$MAE_k$', 'Interpreter', 'latex', 'Orientation', 'horizontal', ...
     'Location', 'northeast')
 
-
-
-% Stopp motorer ved avslutning
+% Cleanup (same as before)
 if online
     stop(motorA);
     stop(motorB);
-    %save(filename, 'Tid', 'Lys', 'VinkelPosMotorA', 'VinkelPosMotorB', ...
-       % 'r', 'y', 'e', 'u_A', 'u_B', 'IAE', 'MAE', 'TVA', 'TVB');
+    save(filename, 'Tid', 'Lys', 'VinkelPosMotorA', 'VinkelPosMotorB', ...
+        'r', 'y', 'e', 'u_A', 'u_B', 'IAE', 'MAE', 'TVA', 'TVB');
 end
-
-
-
-% At the end of the file, after the main while loop and motor stop commands
 
 % Calculate quality metrics
 y_mean = mean(y);        % Mean of light measurements
